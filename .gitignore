@@ -23,3 +23,5 @@ package/installer/inno/stage/
 package/installer/inno/output/
 
 tools/
+
+.idea/
