@@ -22,6 +22,6 @@ package/checkpoint/
 package/installer/inno/stage/
 package/installer/inno/output/
 
-tools/
+tools/bin/
 
 .idea/
