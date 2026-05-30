@@ -1,0 +1,28 @@
+{
+  "name": "filebridge",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/start-vite-dev.mjs",
+    "dev:vite": "vite",
+    "dev:tauri-prep": "node scripts/ensure-vite-dev.mjs",
+    "build": "vue-tsc --noEmit && vite build",
+    "prepare:tauri-runtime": "node scripts/prepare-tauri-runtime.mjs",
+    "tauri:prepare": "npm run build && npm run prepare:tauri-runtime",
+    "preview": "vite preview",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.7",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  }
+}

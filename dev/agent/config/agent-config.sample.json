@@ -1,0 +1,19 @@
+﻿{
+  "api": {
+    "host": "127.0.0.1",
+    "port": 18090,
+    "token": ""
+  },
+  "sqlite": {
+    "databasePath": "../../../package/data/filebridge.sqlite"
+  },
+  "paths": {
+    "initSqlPath": "../sql/sqlite-init.sql",
+    "logFile": "../../../package/logs/filebridge-agent.log",
+    "checkpointDir": "../../../package/checkpoint"
+  },
+  "retry": {
+    "maxAttempts": 3,
+    "backoffMillis": 500
+  }
+}

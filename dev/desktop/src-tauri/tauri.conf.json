@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FileBridge",
+  "version": "1.0.1",
+  "identifier": "com.acme.filebridge",
+  "build": {
+    "beforeDevCommand": "npm run dev:tauri-prep",
+    "beforeBuildCommand": "npm run tauri:prepare",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "FileBridge",
+        "width": 1320,
+        "height": 860,
+        "minWidth": 980,
+        "minHeight": 680,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "windows/nsis-service-hooks.nsh",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ]
+      }
+    },
+    "resources": {
+      "resources/embedded-runtime/agent/": "embedded-runtime/agent/",
+      "resources/embedded-runtime/jre/": "embedded-runtime/jre/",
+      "resources/embedded-runtime/service/": "embedded-runtime/service/"
+    },
+    "icon": [
+      "icons/icon.ico"
+    ]
+  }
+}
