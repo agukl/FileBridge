@@ -1,9 +1,12 @@
-import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
+import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
 import { fileOperationsApi, fileSourcesApi, runsApi } from "../../../app/api/client";
-import type { AgentConfig, FileCopyRequest, FileListing, SyncRun, TaskCard } from "../../../app/api/types";
+import type { AgentConfig, FileCopyRequest, FileListing, FileMoveRequest, SyncRun, TaskCard } from "../../../app/api/types";
 import { formatBytes, formatNumber } from "../../../shared/formatters";
 
 type CopyPaneSide = "left" | "right";
+
+const COPY_PANE_LIST_LIMIT = 1000;
+const COPY_PANE_CACHE_LIMIT = 80;
 
 export function useFileCopy(
   config: Ref<AgentConfig>,
@@ -15,8 +18,8 @@ export function useFileCopy(
 ) {
   const copyLeftSourceId = ref("");
   const copyRightSourceId = ref("");
-  const copyLeftListing = ref<FileListing | null>(null);
-  const copyRightListing = ref<FileListing | null>(null);
+  const copyLeftListing = shallowRef<FileListing | null>(null);
+  const copyRightListing = shallowRef<FileListing | null>(null);
   const copyLeftLoading = ref(false);
   const copyRightLoading = ref(false);
   const copyLeftError = ref("");
@@ -25,9 +28,14 @@ export function useFileCopy(
   const fileCopying = ref(false);
   const trackedCopyOperationId = ref<number | null>(null);
   const refreshedCopyOperationIds = new Set<number>();
+  const listingCache = new Map<string, FileListing>();
+  const paneRequestSeq: Record<CopyPaneSide, number> = {
+    left: 0,
+    right: 0
+  };
 
   const activeCopyRun = computed(() => (
-    runs.value.find((run) => run.operationType === "FILE_COPY" && run.state === "RUNNING") ?? null
+    runs.value.find((run) => isCopyProgressRun(run) && run.state === "RUNNING") ?? null
   ));
 
   function ensureCopySources() {
@@ -98,6 +106,66 @@ export function useFileCopy(
       }
       return;
     }
+    const currentListing = side === "left" ? copyLeftListing.value : copyRightListing.value;
+    const nextPath = path || currentListing?.path || source.sourcePath || "/";
+    const cacheKey = copyListingCacheKey(sourceId, nextPath);
+    const cachedListing = listingCache.get(cacheKey) ?? null;
+    const requestId = ++paneRequestSeq[side];
+    if (cachedListing) {
+      setCopyListing(side, cachedListing);
+    }
+    if (side === "left") {
+      copyLeftLoading.value = true;
+      copyLeftError.value = "";
+    } else {
+      copyRightLoading.value = true;
+      copyRightError.value = "";
+    }
+    try {
+      const result = await fileSourcesApi.files(config.value, sourceId, nextPath, COPY_PANE_LIST_LIMIT);
+      if (requestId !== paneRequestSeq[side]) {
+        return;
+      }
+      rememberCopyListing(cacheKey, result.listing);
+      setCopyListing(side, result.listing);
+    } catch (ex) {
+      if (requestId !== paneRequestSeq[side]) {
+        return;
+      }
+      const message = ex instanceof Error ? ex.message : "无法读取目录";
+      if (side === "left") {
+        copyLeftError.value = message;
+        if (!cachedListing) {
+          copyLeftListing.value = null;
+        }
+      } else {
+        copyRightError.value = message;
+        if (!cachedListing) {
+          copyRightListing.value = null;
+        }
+      }
+    } finally {
+      if (requestId !== paneRequestSeq[side]) {
+        return;
+      }
+      if (side === "left") {
+        copyLeftLoading.value = false;
+      } else {
+        copyRightLoading.value = false;
+      }
+    }
+  }
+
+  async function loadCopyPaneLegacy(side: CopyPaneSide, sourceId: string, path?: string) {
+    const source = fileSources.value.find((item) => item.task.taskId === sourceId)?.task;
+    if (!source) {
+      if (side === "left") {
+        copyLeftError.value = "来源文件源不存在";
+      } else {
+        copyRightError.value = "目标文件源不存在";
+      }
+      return;
+    }
     if (side === "left") {
       copyLeftLoading.value = true;
       copyLeftError.value = "";
@@ -156,6 +224,25 @@ export function useFileCopy(
     }
   }
 
+  async function moveFiles(payload: FileMoveRequest) {
+    fileCopying.value = true;
+    fileError.value = "";
+    copyMessage.value = "";
+    try {
+      const result = await fileOperationsApi.move(config.value, payload);
+      trackedCopyOperationId.value = result.operationId;
+      copyMessage.value = `\u79fb\u52a8\u5df2\u63d0\u4ea4\uff1a#${result.operationId}\uff0c\u6b63\u5728\u6267\u884c\u3002`;
+      await refreshRuns();
+      await followCopyOperation(result.operationId);
+    } catch (ex) {
+      copyMessage.value = ex instanceof Error ? ex.message : "\u79fb\u52a8\u6587\u4ef6\u5931\u8d25";
+      fileError.value = copyMessage.value;
+      await refreshRuns();
+    } finally {
+      fileCopying.value = false;
+    }
+  }
+
   async function cancelCopyOperation(operationId: number) {
     try {
       await fileOperationsApi.cancel(config.value, operationId);
@@ -196,11 +283,12 @@ export function useFileCopy(
     selectCopyPaneSource,
     openCopyPanePath,
     copyFiles,
+    moveFiles,
     cancelCopyOperation
   };
 
   async function followCopyOperation(operationId: number) {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    for (let attempt = 0; attempt < 500; attempt++) {
       const run = findRun(operationId) ?? await fetchRecentOperationRun(operationId);
       if (run) {
         applyTrackedCopyRun(run);
@@ -208,7 +296,7 @@ export function useFileCopy(
           return;
         }
       }
-      await sleep(650);
+      await sleep(attempt < 8 ? 650 : 1200);
       await refreshRuns();
     }
   }
@@ -237,30 +325,60 @@ export function useFileCopy(
       void loadCopyPane("right", copyRightSourceId.value, copyRightListing.value?.path || run.targetPath);
     }
   }
+
+  function setCopyListing(side: CopyPaneSide, listing: FileListing) {
+    if (side === "left") {
+      copyLeftListing.value = listing;
+    } else {
+      copyRightListing.value = listing;
+    }
+  }
+
+  function copyListingCacheKey(sourceId: string, path: string) {
+    return `${sourceId}\u0000${path || "/"}`;
+  }
+
+  function rememberCopyListing(key: string, listing: FileListing) {
+    listingCache.delete(key);
+    listingCache.set(key, listing);
+    while (listingCache.size > COPY_PANE_CACHE_LIMIT) {
+      const oldestKey = listingCache.keys().next().value;
+      if (!oldestKey) {
+        return;
+      }
+      listingCache.delete(oldestKey);
+    }
+  }
 }
 
 function copyRunMessage(run: SyncRun) {
+  const action = (run.operationType || "").toUpperCase() === "FILE_MOVE" ? "移动" : "复制";
   const summary = `文件 ${formatNumber(run.fileCount)} · 目录 ${formatNumber(run.directoryCount)} · ${formatBytes(run.totalBytes)}`;
   if (run.state === "RUNNING") {
-    return `复制进行中：#${run.id}，${summary}`;
+    return `${action}进行中：#${run.id}，${summary}`;
   }
   if (run.state === "SUCCESS") {
     if (run.errorCount > 0 || run.finalHealth === "COMPLETED_WITH_ERRORS") {
-      return `复制完成但有错误：#${run.id}，${summary}，错误 ${formatNumber(run.errorCount)} 项`;
+      return `${action}完成但有错误：#${run.id}，${summary}，错误 ${formatNumber(run.errorCount)} 项`;
     }
     if (run.warningCount > 0 || run.finalHealth === "COMPLETED_WITH_WARNINGS") {
-      return `复制完成但有跳过：#${run.id}，${summary}，跳过 ${formatNumber(run.warningCount)} 项`;
+      return `${action}完成但有跳过：#${run.id}，${summary}，跳过 ${formatNumber(run.warningCount)} 项`;
     }
-    return `复制完成：#${run.id}，${summary}`;
+    return `${action}完成：#${run.id}，${summary}`;
   }
   if (run.state === "CANCELLED") {
-    return `复制已取消：#${run.id}，${summary}`;
+    return `${action}已取消：#${run.id}，${summary}`;
   }
-  return `复制失败：#${run.id}，${run.lastErrorMessage || summary}`;
+  return `${action}失败：#${run.id}，${run.lastErrorMessage || summary}`;
 }
 
 function isTerminalRun(run: SyncRun) {
   return run.state !== "RUNNING";
+}
+
+function isCopyProgressRun(run: SyncRun) {
+  const operation = (run.operationType || "").toUpperCase();
+  return operation === "FILE_COPY" || operation === "DIRECTORY_COPY_TASK";
 }
 
 function sleep(ms: number) {

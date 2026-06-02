@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { FileListing, TaskCard } from "../../../app/api/types";
+import type { FileListing, FileMoveRequest, TaskCard } from "../../../app/api/types";
 import FileBrowserPanel from "../components/FileBrowserPanel.vue";
 
 defineProps<{
@@ -15,6 +15,7 @@ defineEmits<{
   openPath: [path?: string];
   parent: [];
   refresh: [];
+  moveFiles: [payload: FileMoveRequest];
 }>();
 </script>
 
@@ -30,6 +31,7 @@ defineEmits<{
       @open-path="$emit('openPath', $event)"
       @parent="$emit('parent')"
       @refresh="$emit('refresh')"
+      @move-files="$emit('moveFiles', $event)"
     />
   </section>
 </template>

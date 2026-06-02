@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import type { FileEntry, FileListing, TaskCard } from "../../../app/api/types";
+import type { FileEntry, FileListing, FileMoveRequest, TaskCard } from "../../../app/api/types";
 import { systemFileClipboardApi } from "../../../app/runtime/systemFileClipboard";
+import { systemFileOpenApi } from "../../../app/runtime/systemFileOpen";
 import { displayTime, formatBytes } from "../../../shared/formatters";
 
 type SortKey = "name" | "type" | "size" | "modifiedAt";
@@ -12,6 +13,30 @@ type ContextMenuState = {
   y: number;
   entry: FileEntry | null;
 };
+type BrowserDragPayload = {
+  sourceId: string;
+  paths: string[];
+};
+type BrowserPointerDrag = {
+  payload: BrowserDragPayload;
+  entry: FileEntry;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  active: boolean;
+  moved: boolean;
+};
+type BrowserNotice = {
+  key: string;
+  title: string;
+  message: string;
+  tone: "info" | "warning";
+};
+
+const BROWSER_DRAG_THRESHOLD = 6;
+const BROWSER_LONG_PRESS_MS = 420;
 
 const props = defineProps<{
   sources: TaskCard[];
@@ -26,6 +51,7 @@ const emit = defineEmits<{
   openPath: [path: string];
   parent: [];
   refresh: [];
+  moveFiles: [payload: FileMoveRequest];
 }>();
 
 const selectedSource = computed(() => (
@@ -42,31 +68,23 @@ const cacheTooltipVisible = ref(false);
 const refreshHintArmed = ref(false);
 const clipboardBusy = ref(false);
 const clipboardMessage = ref("");
+const clipboardMessageTone = ref<BrowserNotice["tone"]>("info");
 const contextMenu = ref<ContextMenuState>({ open: false, x: 0, y: 0, entry: null });
+const fileAreaRef = ref<HTMLElement | null>(null);
+const browserDrag = ref<BrowserPointerDrag | null>(null);
+const dragOriginPaths = ref<Set<string>>(new Set());
+const dragOverTargetPath = ref("");
+const suppressEntryClick = ref(false);
 let cacheTooltipTimer: ReturnType<typeof setTimeout> | null = null;
 let clipboardMessageTimer: ReturnType<typeof setTimeout> | null = null;
+let entryClickSuppressTimer: ReturnType<typeof setTimeout> | null = null;
+let refreshAfterDragTimer: ReturnType<typeof setTimeout> | null = null;
+let browserLongPressTimer: ReturnType<typeof setTimeout> | null = null;
 
 const currentPath = computed(() => props.listing?.path || selectedSource.value?.task.sourcePath || "/");
 const canGoParent = computed(() => Boolean(props.listing?.parentPath));
 const isLocalSource = computed(() => ["LOCAL", "SMB"].includes(selectedSource.value?.task.sourceType ?? ""));
 const sourceRootPath = computed(() => selectedSource.value?.task.sourcePath || "/");
-const selectedSourceMeta = computed(() => {
-  const source = selectedSource.value?.task;
-  if (!source) {
-    return "";
-  }
-  if (source.sourceType === "LOCAL" || source.sourceType === "SMB") {
-    return source.sourcePath;
-  }
-  return `${source.ftpHost}:${source.ftpPort} · ${source.sourcePath}`;
-});
-const sourceKindText = computed(() => {
-  const type = selectedSource.value?.task.sourceType;
-  if (type === "SMB") {
-    return "SMB 文件源";
-  }
-  return isLocalSource.value ? "本地文件源" : "远程 FTP";
-});
 const breadcrumbs = computed(() => buildBreadcrumbs());
 const childDirectories = computed(() => (
   (props.listing?.entries ?? [])
@@ -91,6 +109,45 @@ const contextMenuStyle = computed(() => ({
   left: `${contextMenu.value.x}px`,
   top: `${contextMenu.value.y}px`
 }));
+const browserDragStyle = computed(() => {
+  const session = browserDrag.value;
+  return session
+    ? { transform: `translate3d(${session.x + 14}px, ${session.y + 14}px, 0)` }
+    : {};
+});
+const browserDragTitle = computed(() => {
+  const session = browserDrag.value;
+  if (!session) {
+    return "";
+  }
+  return session.entry.name || session.entry.path;
+});
+const browserDragHint = computed(() => (
+  dragOverTargetPath.value
+    ? `移动到 ${dragOverTargetPath.value}`
+    : "拖到文件夹中移动"
+));
+const browserNotices = computed<BrowserNotice[]>(() => {
+  const notices: BrowserNotice[] = [];
+  const pageError = props.error.trim();
+  if (pageError) {
+    notices.push({
+      key: `browser-error:${pageError}`,
+      title: "文件浏览错误",
+      message: pageError,
+      tone: "warning"
+    });
+  }
+  if (clipboardMessage.value) {
+    notices.push({
+      key: `browser-message:${clipboardMessageTone.value}:${clipboardMessage.value}`,
+      title: clipboardMessageTone.value === "warning" ? "文件操作失败" : "文件操作提示",
+      message: clipboardMessage.value,
+      tone: clipboardMessageTone.value
+    });
+  }
+  return notices;
+});
 const statusText = computed(() => {
   if (!props.listing) {
     return "";
@@ -159,6 +216,14 @@ onBeforeUnmount(() => {
   if (clipboardMessageTimer) {
     window.clearTimeout(clipboardMessageTimer);
   }
+  if (entryClickSuppressTimer) {
+    window.clearTimeout(entryClickSuppressTimer);
+  }
+  if (refreshAfterDragTimer) {
+    window.clearTimeout(refreshAfterDragTimer);
+  }
+  clearBrowserLongPressTimer();
+  removeBrowserDragListeners();
 });
 
 function onSourceChange(event: Event) {
@@ -179,11 +244,261 @@ function selectEntry(entry: FileEntry) {
   selectedEntryPath.value = entry.path;
 }
 
-function activateEntry(entry: FileEntry) {
+async function activateEntry(entry: FileEntry) {
   selectEntry(entry);
   if (entry.type === "DIRECTORY") {
     emit("openPath", entry.path);
+    return;
   }
+  await openEntryFile(entry);
+}
+
+async function openEntryFile(entry: FileEntry) {
+  if (entry.type !== "FILE") {
+    return;
+  }
+  if (!isLocalSource.value) {
+    setClipboardMessage("远端 FTP 文件需要先复制到本地后打开。", true);
+    return;
+  }
+  try {
+    await systemFileOpenApi.open(entry.path);
+    setClipboardMessage(`已打开：${entry.name}`);
+  } catch (ex) {
+    setClipboardMessage(ex instanceof Error ? ex.message : "打开文件失败。", true);
+  }
+}
+
+function onEntryClick(event: MouseEvent, entry: FileEntry) {
+  if (suppressEntryClick.value) {
+    event.preventDefault();
+    event.stopPropagation();
+    suppressEntryClick.value = false;
+    return;
+  }
+  selectEntry(entry);
+}
+
+function onBrowserEntryPointerDown(entry: FileEntry, event: PointerEvent) {
+  if (shouldIgnoreBrowserDrag(event)) {
+    return;
+  }
+  const source = selectedSource.value;
+  if (!source || !props.listing) {
+    return;
+  }
+  hideContextMenu();
+  selectEntry(entry);
+  browserDrag.value = {
+    payload: {
+      sourceId: source.task.taskId,
+      paths: [entry.path]
+    },
+    entry,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    x: event.clientX,
+    y: event.clientY,
+    active: false,
+    moved: false
+  };
+  (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+  scheduleBrowserLongPress();
+  window.addEventListener("pointermove", onBrowserEntryPointerMove);
+  window.addEventListener("pointerup", onBrowserEntryPointerUp);
+  window.addEventListener("pointercancel", onBrowserEntryPointerCancel);
+}
+
+function shouldIgnoreBrowserDrag(event: PointerEvent) {
+  if (event.button !== 0) {
+    return true;
+  }
+  const target = event.target;
+  return target instanceof Element && Boolean(target.closest("input, select, textarea, .explorer-context-menu"));
+}
+
+function onBrowserEntryPointerMove(event: PointerEvent) {
+  const session = browserDrag.value;
+  if (!session || event.pointerId !== session.pointerId) {
+    return;
+  }
+  const distance = Math.hypot(event.clientX - session.startX, event.clientY - session.startY);
+  if (!session.active && distance < BROWSER_DRAG_THRESHOLD) {
+    browserDrag.value = {
+      ...session,
+      x: event.clientX,
+      y: event.clientY
+    };
+    return;
+  }
+  clearBrowserLongPressTimer();
+  if (!session.active && !startBrowserDrag(session, event.clientX, event.clientY, true)) {
+    event.preventDefault();
+    return;
+  }
+  const activeSession = browserDrag.value;
+  if (!activeSession || event.pointerId !== activeSession.pointerId) {
+    return;
+  }
+  const targetPath = resolveBrowserDropTargetAtPoint(event.clientX, event.clientY, activeSession.payload);
+  dragOverTargetPath.value = targetPath;
+  browserDrag.value = {
+    ...activeSession,
+    active: true,
+    x: event.clientX,
+    y: event.clientY,
+    moved: activeSession.moved || distance >= BROWSER_DRAG_THRESHOLD
+  };
+  event.preventDefault();
+}
+
+function scheduleBrowserLongPress() {
+  clearBrowserLongPressTimer();
+  browserLongPressTimer = window.setTimeout(() => {
+    browserLongPressTimer = null;
+    const session = browserDrag.value;
+    if (!session || session.active) {
+      return;
+    }
+    startBrowserDrag(session, session.x, session.y, false);
+  }, BROWSER_LONG_PRESS_MS);
+}
+
+function clearBrowserLongPressTimer() {
+  if (!browserLongPressTimer) {
+    return;
+  }
+  window.clearTimeout(browserLongPressTimer);
+  browserLongPressTimer = null;
+}
+
+function startBrowserDrag(session: BrowserPointerDrag, clientX: number, clientY: number, moved: boolean) {
+  const source = selectedSource.value;
+  if (!source?.task.permission?.canRead || !source.task.permission?.canWrite) {
+    setClipboardMessage("当前文件源需要同时具备读取和写入权限，才能拖动移动。", true);
+    removeBrowserDragListeners();
+    browserDrag.value = null;
+    clearBrowserDragState();
+    return false;
+  }
+  dragOriginPaths.value = new Set(session.payload.paths);
+  dragOverTargetPath.value = resolveBrowserDropTargetAtPoint(clientX, clientY, session.payload);
+  browserDrag.value = {
+    ...session,
+    active: true,
+    x: clientX,
+    y: clientY,
+    moved: session.moved || moved
+  };
+  return true;
+}
+
+function onBrowserEntryPointerUp(event: PointerEvent) {
+  finishBrowserDrag(event, false);
+}
+
+function onBrowserEntryPointerCancel(event: PointerEvent) {
+  finishBrowserDrag(event, true);
+}
+
+function finishBrowserDrag(event: PointerEvent, cancelled: boolean) {
+  const session = browserDrag.value;
+  if (!session || event.pointerId !== session.pointerId) {
+    return;
+  }
+  clearBrowserLongPressTimer();
+  removeBrowserDragListeners();
+  browserDrag.value = null;
+  if (!session.active) {
+    clearBrowserDragState();
+    return;
+  }
+  if (!session.moved) {
+    clearBrowserDragState();
+    event.preventDefault();
+    return;
+  }
+  suppressNextEntryClick();
+  const targetPath = cancelled
+    ? ""
+    : dragOverTargetPath.value || resolveBrowserDropTargetAtPoint(event.clientX, event.clientY, session.payload);
+  if (targetPath) {
+    emit("moveFiles", {
+      sourceId: session.payload.sourceId,
+      sourcePaths: session.payload.paths,
+      targetDirectory: targetPath,
+      conflictPolicy: "SKIP"
+    });
+    setClipboardMessage(`已提交拖拽移动：${session.entry.name} -> ${targetPath}`);
+    scheduleRefreshAfterDrag();
+  } else if (!cancelled) {
+    setClipboardMessage("拖拽未完成：请释放到文件夹、目录树或面包屑上。", true);
+  }
+  clearBrowserDragState();
+  event.preventDefault();
+}
+
+function removeBrowserDragListeners() {
+  clearBrowserLongPressTimer();
+  window.removeEventListener("pointermove", onBrowserEntryPointerMove);
+  window.removeEventListener("pointerup", onBrowserEntryPointerUp);
+  window.removeEventListener("pointercancel", onBrowserEntryPointerCancel);
+}
+
+function clearBrowserDragState() {
+  dragOriginPaths.value = new Set();
+  dragOverTargetPath.value = "";
+}
+
+function suppressNextEntryClick() {
+  suppressEntryClick.value = true;
+  if (entryClickSuppressTimer) {
+    window.clearTimeout(entryClickSuppressTimer);
+  }
+  entryClickSuppressTimer = window.setTimeout(() => {
+    suppressEntryClick.value = false;
+    entryClickSuppressTimer = null;
+  }, 140);
+}
+
+function resolveBrowserDropTargetAtPoint(clientX: number, clientY: number, payload: BrowserDragPayload) {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+    return "";
+  }
+  const hit = document.elementFromPoint(clientX, clientY);
+  const target = hit instanceof Element
+    ? hit.closest<HTMLElement>("[data-browser-drop-path]")
+    : null;
+  const path = target?.dataset.browserDropPath || "";
+  return isValidBrowserDropTarget(path, payload) ? path : "";
+}
+
+function isValidBrowserDropTarget(targetPath: string, payload: BrowserDragPayload) {
+  if (!targetPath) {
+    return false;
+  }
+  return payload.paths.every((sourcePath) => !isSameOrNestedPath(targetPath, sourcePath));
+}
+
+function isSameOrNestedPath(targetPath: string, sourcePath: string) {
+  const target = normalizeComparablePath(targetPath);
+  const source = normalizeComparablePath(sourcePath);
+  return target === source || target.startsWith(`${source}/`);
+}
+
+function normalizeComparablePath(path: string) {
+  return path.replace(/\\/g, "/").replace(/\/+$/g, "").toLocaleLowerCase() || "/";
+}
+
+function scheduleRefreshAfterDrag() {
+  if (refreshAfterDragTimer) {
+    window.clearTimeout(refreshAfterDragTimer);
+  }
+  refreshAfterDragTimer = window.setTimeout(() => {
+    refreshAfterDragTimer = null;
+    emit("refresh");
+  }, 1800);
 }
 
 function openEntryContextMenu(event: MouseEvent, entry: FileEntry) {
@@ -277,6 +592,7 @@ async function copyPathText() {
 }
 
 function setClipboardMessage(message: string, isError = false) {
+  clipboardMessageTone.value = isError ? "warning" : "info";
   clipboardMessage.value = isError ? `操作失败：${message}` : message;
   if (clipboardMessageTimer) {
     window.clearTimeout(clipboardMessageTimer);
@@ -430,6 +746,13 @@ function lastPathSegment(path: string) {
 
 <template>
   <section class="file-browser-panel">
+    <div v-if="browserNotices.length" class="copy-toast-list explorer-toast-list" role="status" aria-live="polite">
+      <article v-for="notice in browserNotices" :key="notice.key" class="copy-toast" :class="`tone-${notice.tone}`">
+        <strong>{{ notice.title }}</strong>
+        <p>{{ notice.message }}</p>
+      </article>
+    </div>
+
     <section v-if="!sources.length" class="empty-board">
       <span class="eyebrow">File Browser</span>
       <h2>还没有文件源</h2>
@@ -464,8 +787,9 @@ function lastPathSegment(path: string) {
               :key="crumb.path"
               type="button"
               class="explorer-tree-item"
-              :class="{ selected: crumb.current }"
+              :class="{ selected: crumb.current, 'drop-active': dragOverTargetPath === crumb.path }"
               :style="{ paddingLeft: `${10 + index * 18}px` }"
+              :data-browser-drop-path="crumb.current ? undefined : crumb.path"
               :disabled="loading || crumb.current"
               @click="$emit('openPath', crumb.path)"
             >
@@ -477,7 +801,9 @@ function lastPathSegment(path: string) {
               :key="folder.path"
               type="button"
               class="explorer-tree-item child"
+              :class="{ 'drop-active': dragOverTargetPath === folder.path }"
               :style="{ paddingLeft: `${10 + breadcrumbs.length * 18}px` }"
+              :data-browser-drop-path="folder.path"
               :disabled="loading"
               @click="$emit('openPath', folder.path)"
             >
@@ -509,6 +835,8 @@ function lastPathSegment(path: string) {
                   v-for="crumb in breadcrumbs"
                   :key="crumb.path"
                   type="button"
+                  :class="{ 'drop-active': dragOverTargetPath === crumb.path }"
+                  :data-browser-drop-path="crumb.current ? undefined : crumb.path"
                   :disabled="loading || crumb.current"
                   @click="$emit('openPath', crumb.path)"
                 >
@@ -531,11 +859,6 @@ function lastPathSegment(path: string) {
           </header>
 
           <section class="explorer-subbar">
-            <div class="explorer-location">
-              <strong>{{ selectedSource?.task.taskName || selectedSourceId }}</strong>
-              <span>{{ sourceKindText }}</span>
-              <small>{{ selectedSourceMeta }}</small>
-            </div>
             <div class="explorer-tools">
               <input
                 v-model.trim="searchText"
@@ -555,11 +878,11 @@ function lastPathSegment(path: string) {
             </div>
           </section>
 
-          <p v-if="error" class="form-error">{{ error }}</p>
-          <p v-else-if="loading" class="loading-note">正在读取文件...</p>
+          <p v-if="loading" class="loading-note">正在读取文件...</p>
 
           <section
             v-if="listing && !loading"
+            ref="fileAreaRef"
             class="explorer-file-area"
             tabindex="0"
             @click="hideContextMenu"
@@ -580,13 +903,15 @@ function lastPathSegment(path: string) {
                 v-for="entry in visibleEntries"
                 :key="entry.path"
                 class="explorer-row"
-                :class="{ selected: selectedEntryPath === entry.path, directory: entry.type === 'DIRECTORY' }"
+                :class="{ selected: selectedEntryPath === entry.path, directory: entry.type === 'DIRECTORY', 'drag-origin': dragOriginPaths.has(entry.path), 'drop-active': dragOverTargetPath === entry.path }"
+                :data-browser-drop-path="entry.type === 'DIRECTORY' ? entry.path : undefined"
                 :title="entry.path"
                 role="button"
                 tabindex="0"
-                @click="selectEntry(entry)"
+                @click="onEntryClick($event, entry)"
                 @contextmenu="openEntryContextMenu($event, entry)"
                 @dblclick="activateEntry(entry)"
+                @pointerdown="onBrowserEntryPointerDown(entry, $event)"
                 @keydown.enter.prevent="activateEntry(entry)"
               >
                 <span class="explorer-name-cell">
@@ -605,11 +930,13 @@ function lastPathSegment(path: string) {
                 :key="entry.path"
                 type="button"
                 class="explorer-tile"
-                :class="{ selected: selectedEntryPath === entry.path }"
+                :class="{ selected: selectedEntryPath === entry.path, 'drag-origin': dragOriginPaths.has(entry.path), 'drop-active': dragOverTargetPath === entry.path }"
+                :data-browser-drop-path="entry.type === 'DIRECTORY' ? entry.path : undefined"
                 :title="entry.path"
-                @click="selectEntry(entry)"
+                @click="onEntryClick($event, entry)"
                 @contextmenu="openEntryContextMenu($event, entry)"
                 @dblclick="activateEntry(entry)"
+                @pointerdown="onBrowserEntryPointerDown(entry, $event)"
               >
                 <span class="entry-icon large" :class="entry.type.toLocaleLowerCase()"></span>
                 <strong>{{ entry.name }}</strong>
@@ -629,7 +956,7 @@ function lastPathSegment(path: string) {
               @contextmenu.prevent.stop
             >
               <button
-                v-if="contextMenu.entry?.type === 'DIRECTORY'"
+                v-if="contextMenu.entry"
                 type="button"
                 @click="contextMenu.entry && activateEntry(contextMenu.entry)"
               >
@@ -662,9 +989,13 @@ function lastPathSegment(path: string) {
             </div>
           </section>
 
+          <div v-if="browserDrag?.active" class="explorer-drag-ghost" :style="browserDragStyle" aria-hidden="true">
+            <strong>{{ browserDragTitle }}</strong>
+            <span>{{ browserDragHint }}</span>
+          </div>
+
           <footer v-if="listing" class="explorer-status-bar">
             <span>{{ statusText }}</span>
-            <span v-if="clipboardMessage">{{ clipboardMessage }}</span>
             <span v-if="listing.cacheUsed">{{ cacheNotice(listing) }}</span>
           </footer>
         </article>

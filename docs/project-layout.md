@@ -38,7 +38,7 @@
 正式安装包：
 
 ```text
-package\output\FileBridge Setup 1.0.1.exe
+package\output\FileBridge Setup 1.0.2.exe
 ```
 
 ## 可清理目录

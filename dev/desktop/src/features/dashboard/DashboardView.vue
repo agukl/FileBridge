@@ -194,6 +194,7 @@ const {
   selectCopyPaneSource,
   openCopyPanePath,
   copyFiles,
+  moveFiles,
   cancelCopyOperation
 } = useFileCopy(config, fileSources, selectedSourceId, runs, refreshRuns, fileError);
 const eventLogCountText = computed(() => (
@@ -386,6 +387,7 @@ onUnmounted(() => {
         @open-path="loadFiles"
         @parent="loadParentPath"
         @refresh="loadFiles"
+        @move-files="moveFiles"
       />
 
       <CopyPage

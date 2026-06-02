@@ -62,6 +62,9 @@ function operationTitle(run: SyncRun) {
   if (operation === "DIRECTORY_COPY_TASK" || eventType.startsWith("DIRECTORY_COPY") || eventType.startsWith("DIRECTORY_COMPARE")) {
     return "目录复制";
   }
+  if (operation === "FILE_MOVE" || eventType.startsWith("FILE_MOVE") || eventType === "FILE_MOVED") {
+    return "文件移动";
+  }
   if (operation === "FILE_COPY" || eventType.startsWith("FILE_COPY") || eventType === "FILE_COPIED" || eventType === "FILE_SKIPPED") {
     return "文件复制";
   }

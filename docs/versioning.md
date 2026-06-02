@@ -1,6 +1,6 @@
 # 版本维护说明
 
-当前归档版本：`1.0.1`
+当前归档版本：`1.0.2`
 
 ## 版本号位置
 
@@ -62,7 +62,7 @@ rg -n "1\.0\.0|FileBridge Setup 1\.0\.0" ^
 输出目录最终只保留当前版本安装包：
 
 ```text
-package\output\FileBridge Setup 1.0.1.exe
+package\output\FileBridge Setup 1.0.2.exe
 ```
 
 ## 归档注意

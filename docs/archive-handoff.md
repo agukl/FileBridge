@@ -47,7 +47,7 @@ tools\scripts\build-windows-installer.cmd -SkipTests
 输出：
 
 ```text
-package\output\FileBridge Setup 1.0.1.exe
+package\output\FileBridge Setup 1.0.2.exe
 ```
 
 ## 授权注意

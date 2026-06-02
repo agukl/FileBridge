@@ -123,7 +123,7 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  Production installer:"
 Write-Host "    tools\scripts\build-windows-installer.cmd -SkipTests"
-Write-Host "    package\output\FileBridge Setup 1.0.1.exe"
+Write-Host "    package\output\FileBridge Setup 1.0.2.exe"
 Write-Host "  Development:"
 Write-Host "    tools\scripts\build-all.cmd"
 Write-Host "    tools\scripts\start-agent.cmd -Restart"

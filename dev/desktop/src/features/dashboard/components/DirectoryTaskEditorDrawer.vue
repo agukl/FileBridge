@@ -195,7 +195,7 @@ function submit() {
         <div class="form-grid two">
           <label>
             任务名称
-            <input v-model.trim="form.name" placeholder="日报目录自动复制" />
+            <input v-model.trim="form.name" placeholder="定期目录复制任务" />
           </label>
           <label>
             冲突策略

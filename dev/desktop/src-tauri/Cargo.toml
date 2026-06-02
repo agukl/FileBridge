@@ -1,6 +1,6 @@
 [package]
 name = "filebridge"
-version = "1.0.1"
+version = "1.0.2"
 description = "FileBridge desktop console"
 authors = ["Acme"]
 edition = "2021"

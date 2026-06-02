@@ -17,7 +17,7 @@ tools\scripts\build-windows-installer.cmd -SkipTests
 输出：
 
 ```text
-package\output\FileBridge Setup 1.0.1.exe
+package\output\FileBridge Setup 1.0.2.exe
 ```
 
 构建过程会生成 `package\stage\`，该目录可删除重建，不要手工维护。

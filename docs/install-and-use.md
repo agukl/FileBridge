@@ -12,7 +12,7 @@
 安装包位置：
 
 ```cmd
-package\output\FileBridge Setup 1.0.1.exe
+package\output\FileBridge Setup 1.0.2.exe
 ```
 
 ## 生产路径

@@ -57,8 +57,11 @@ const isRemoteSource = computed(() => form.sourceType === "REMOTE_FTP");
 const needsPassword = computed(() => isRemoteSource.value || isSmbSource.value);
 const usesFtps = computed(() => isRemoteSource.value && form.secureMode !== "NONE");
 const hasStoredPassword = computed(() => Boolean(props.task?.passwordConfigured));
+const taskNamePlaceholder = computed(() => (
+  isLocalSource.value ? "本机目录文件源" : isSmbSource.value ? "SMB 共享文件源" : "FTP 文件源"
+));
 const passwordPlaceholder = computed(() => (
-  hasStoredPassword.value ? "********" : isSmbSource.value ? "env:SMB_PASSWORD 或 plain:密码" : "env:FTP_PASSWORD 或 plain:密码"
+  hasStoredPassword.value ? "********" : isSmbSource.value ? "env:SMB_PASSWORD 或 plain:密码文本" : "env:FTP_PASSWORD 或 plain:密码文本"
 ));
 const invalidReason = computed(() => basicInvalidReason());
 const remoteBrowseInvalidReason = computed(() => {
@@ -92,7 +95,7 @@ watch(
     form.secureMode = source?.secureMode ?? "NONE";
     form.tlsFingerprint = source?.tlsFingerprint ?? "";
     form.tlsFingerprintHash = source?.tlsFingerprintHash ?? "SHA256";
-    form.sourcePath = source?.sourcePath ?? (form.sourceType === "REMOTE_FTP" ? "/" : form.sourceType === "SMB" ? "\\\\server\\share" : "");
+    form.sourcePath = source?.sourcePath ?? (form.sourceType === "REMOTE_FTP" ? "/" : "");
     form.remoteDirectoryCacheEnabled = Boolean(source?.remoteDirectoryCacheEnabled);
     resetDraftState();
   },
@@ -311,23 +314,23 @@ function submit(runPreflight: boolean) {
         <div class="form-grid two">
           <label>
             文件源名称
-            <input v-model.trim="form.taskName" :placeholder="isLocalSource ? '本地资料目录' : isSmbSource ? '共享资料目录' : '日报 FTP 文件源'" />
+            <input v-model.trim="form.taskName" :placeholder="taskNamePlaceholder" />
           </label>
           <label v-if="isLocalSource">
             路径
-            <input v-model.trim="form.sourcePath" placeholder="D:\\Files\\Reports" />
+            <input v-model.trim="form.sourcePath" placeholder="D:\\path\\to\\folder" />
           </label>
           <label v-if="isSmbSource">
             共享路径
-            <input v-model.trim="form.sourcePath" placeholder="\\\\Desktop-7euojmh\\d" />
+            <input v-model.trim="form.sourcePath" placeholder="\\\\server\\share" />
           </label>
           <label v-if="isSmbSource">
             用户名
-            <input v-model.trim="form.ftpUsername" placeholder="Desktop-7euojmh\\admin" />
+            <input v-model.trim="form.ftpUsername" placeholder="HOST\\username 或 username" />
           </label>
           <label v-if="isRemoteSource">
             FTP Host
-            <input v-model.trim="form.ftpHost" placeholder="192.168.1.10" />
+            <input v-model.trim="form.ftpHost" placeholder="ftp.example.com" />
           </label>
           <label v-if="isRemoteSource">
             端口
@@ -335,7 +338,7 @@ function submit(runPreflight: boolean) {
           </label>
           <label v-if="isRemoteSource">
             用户名
-            <input v-model.trim="form.ftpUsername" placeholder="ftp_user" />
+            <input v-model.trim="form.ftpUsername" placeholder="username" />
           </label>
         </div>
       </section>
@@ -359,7 +362,7 @@ function submit(runPreflight: boolean) {
           </label>
           <label v-if="usesFtps">
             证书指纹
-            <input v-model.trim="form.tlsFingerprint" placeholder="SHA256 指纹，如 74F3..." />
+            <input v-model.trim="form.tlsFingerprint" placeholder="粘贴证书 SHA256 指纹" />
           </label>
           <label v-if="usesFtps">
             指纹算法
@@ -397,7 +400,7 @@ function submit(runPreflight: boolean) {
         </div>
 
         <p v-else class="form-warning">
-          {{ isSmbSource ? "SMB 文件源会使用这里配置的共享路径、用户名和密码引用访问远程目录；远端本地账号建议填写 主机名\\用户名。env: 密码需要配置成系统环境变量，普通部署可用 plain:密码。" : "支持本机盘符路径。访问 SMB 共享请新建 SMB 文件源。" }}
+          {{ isSmbSource ? "SMB 文件源会使用这里配置的共享路径、用户名和密码引用访问远程目录；远端本地账号建议填写 主机名\\用户名。env: 密码需要配置成系统环境变量，普通部署可用 plain:密码文本。" : "支持本机盘符路径。访问 SMB 共享请新建 SMB 文件源。" }}
         </p>
 
         <div v-if="isRemoteSource" class="inline-actions">

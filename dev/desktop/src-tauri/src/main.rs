@@ -244,6 +244,11 @@ fn file_clipboard_paste(target_directory: String) -> Result<FilePasteResult, Str
     paste_system_file_clipboard(target_directory)
 }
 
+#[tauri::command]
+fn open_file_path(path: String) -> Result<(), String> {
+    open_file_with_default_app(path.trim())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AgentProcessState::default())
@@ -255,7 +260,8 @@ fn main() {
             agent_process_set_close_policy,
             file_clipboard_read,
             file_clipboard_write,
-            file_clipboard_paste
+            file_clipboard_paste,
+            open_file_path
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
@@ -272,6 +278,54 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run FileBridge");
+}
+
+#[cfg(windows)]
+fn open_file_with_default_app(path_text: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    let path = Path::new(path_text);
+    if !path.exists() {
+        return Err(format!("文件不存在，无法打开：{}", display_path(path)));
+    }
+
+    let operation: Vec<u16> = OsStr::new("open").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    let code = result as isize;
+    if code <= 32 {
+        return Err(format!("系统无法打开该文件（ShellExecuteW={}）。", code));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn open_file_with_default_app(path_text: &str) -> Result<(), String> {
+    let path = Path::new(path_text);
+    if !path.exists() {
+        return Err(format!("文件不存在，无法打开：{}", display_path(path)));
+    }
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    Command::new(program)
+        .arg(path)
+        .spawn()
+        .map_err(|err| format!("系统无法打开该文件：{err}"))?;
+    Ok(())
 }
 
 #[cfg(windows)]

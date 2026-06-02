@@ -15,6 +15,7 @@
   FileOperationCancelResult,
   FileCopyRequest,
   FileCopyResult,
+  FileMoveRequest,
   HealthBody,
   LicenseDeviceIdResult,
   LicenseStatus,
@@ -202,6 +203,12 @@ export const fileSourcesApi = {
 export const fileOperationsApi = {
   copy(config: AgentConfig, payload: FileCopyRequest) {
     return request<FileCopyResult>(config, "/api/file-operations/copy", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  move(config: AgentConfig, payload: FileMoveRequest) {
+    return request<FileCopyResult>(config, "/api/file-operations/move", {
       method: "POST",
       body: JSON.stringify(payload)
     });

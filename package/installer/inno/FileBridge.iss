@@ -1,5 +1,5 @@
 #define MyAppName "FileBridge"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "acme"
 #define MyAppExeName "filebridge.exe"
 #define MyServiceName "FileBridgeAgent"

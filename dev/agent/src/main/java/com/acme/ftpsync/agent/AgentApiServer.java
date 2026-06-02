@@ -197,6 +197,18 @@ public final class AgentApiServer implements AutoCloseable {
                 return;
             }
 
+            if ("POST".equalsIgnoreCase(method) && "/api/file-operations/move".equals(path)) {
+                try {
+                    licenseService.requireFeature(LicenseFeature.FILE_COPY);
+                    FileCopyService.MoveRequest request =
+                            mapper.readValue(exchange.getRequestBody(), FileCopyService.MoveRequest.class);
+                    respondJson(exchange, 200, fileCopyService.move(request));
+                } catch (IllegalArgumentException | IllegalStateException | SecurityException | IOException ex) {
+                    respondJson(exchange, 400, Map.of("ok", false, "message", safeMessage(ex)));
+                }
+                return;
+            }
+
             if ("GET".equalsIgnoreCase(method) && "/api/directory-copy-tasks".equals(path)) {
                 respondJson(exchange, 200, Map.of(
                         "tasks",

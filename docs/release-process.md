@@ -50,7 +50,7 @@ tools\scripts\build-windows-installer.cmd -SkipTests
 输出文件：
 
 ```text
-package\output\FileBridge Setup 1.0.1.exe
+package\output\FileBridge Setup 1.0.2.exe
 ```
 
 ## 代码签名发布
@@ -117,7 +117,7 @@ tools\scripts\build-windows-installer.cmd -SkipTests -BundleLicense
 发布后至少保留：
 
 ```text
-package\output\FileBridge Setup 1.0.1.exe
+package\output\FileBridge Setup 1.0.2.exe
 docs\release-process.md
 docs\versioning.md
 docs\install-and-use.md

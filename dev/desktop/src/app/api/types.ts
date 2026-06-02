@@ -441,6 +441,13 @@ export type FileCopyRequest = {
   conflictPolicy: "SKIP" | "OVERWRITE" | "FAIL";
 };
 
+export type FileMoveRequest = {
+  sourceId: string;
+  sourcePaths: string[];
+  targetDirectory: string;
+  conflictPolicy: FileCopyRequest["conflictPolicy"];
+};
+
 export type FileCopyResult = {
   ok: boolean;
   operationId: number;

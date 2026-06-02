@@ -6,7 +6,7 @@
 
     <groupId>com.acme</groupId>
     <artifactId>filebridge-agent</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <name>filebridge-agent</name>
     <description>Local FTP sync operations backend with generic error mapping and runtime snapshots.</description>
 

@@ -21,6 +21,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -107,6 +108,42 @@ public final class FileCopyService implements AutoCloseable {
         executor.submit(() -> runCopy(normalized, source, target, targetDirectory, sourceSummary, operationId, control));
         return new CopyResult(true, operationId, 0, 0, 0, 0, 0,
                 "RUNNING", "File copy is running.");
+    }
+
+    public CopyResult move(MoveRequest request) throws Exception {
+        MoveRequest normalized = normalizeMoveRequest(request);
+        SyncTask source = taskRepository.find(normalized.sourceId())
+                .orElseThrow(() -> new IllegalArgumentException("File source not found: " + normalized.sourceId()));
+
+        String targetDirectory = normalized.targetDirectory().isBlank()
+                ? source.sourcePath()
+                : normalized.targetDirectory();
+        String sourceSummary = summarizePaths(normalized.sourcePaths());
+        requireReadable(source);
+        requireWritable(source);
+        rejectRecursiveMove(source, normalized.sourcePaths(), targetDirectory);
+
+        long operationId = runRepository.create(
+                source.taskId(),
+                "FILE_MOVE",
+                sourceSummary,
+                source.taskId(),
+                targetDirectory,
+                normalized.conflictPolicy()
+        );
+
+        CopyControl control = new CopyControl(operationId);
+        controls.put(operationId, control);
+        recordEvent(source, operationId, "INFO", "MOVE", "MOVE", "FILE_MOVE_STARTED",
+                sourceSummary, targetDirectory, null,
+                "File move started.",
+                "policy=" + normalized.conflictPolicy());
+        runRepository.updateProgress(operationId, new SyncRunSummary(
+                "RUNNING", 0, 0, 0, 0, 0, 0, "", "File move is running."
+        ));
+        executor.submit(() -> runMove(normalized, source, targetDirectory, sourceSummary, operationId, control));
+        return new CopyResult(true, operationId, 0, 0, 0, 0, 0,
+                "RUNNING", "File move is running.");
     }
 
     public CopyResult copyCompared(ComparedCopyRequest request) throws Exception {
@@ -290,6 +327,113 @@ public final class FileCopyService implements AutoCloseable {
         }
     }
 
+    private void runMove(MoveRequest normalized,
+                         SyncTask source,
+                         String targetDirectory,
+                         String sourceSummary,
+                         long operationId,
+                         CopyControl control) {
+        control.attachWorker(Thread.currentThread());
+        CopyStats stats = new CopyStats();
+        try {
+            control.throwIfCancelled();
+            try (FileEndpoint endpoint = openEndpoint(source)) {
+                control.addCancelHook(endpoint);
+                endpoint.ensureDirectory(targetDirectory);
+                for (String sourcePath : normalized.sourcePaths()) {
+                    control.throwIfCancelled();
+                    try {
+                        moveEntry(endpoint, sourcePath, targetDirectory, normalized.conflictPolicy(),
+                                operationId, source, stats, control);
+                    } catch (CopyCancelledException ex) {
+                        throw ex;
+                    } catch (Exception ex) {
+                        recordMoveItemFailure(source, operationId, sourcePath, targetDirectory, stats, ex);
+                    }
+                }
+            }
+
+            runRepository.markSuccess(operationId, new SyncRunSummary(
+                    finalCopyHealth(stats),
+                    stats.itemCount(),
+                    stats.fileCount,
+                    stats.directoryCount,
+                    stats.totalBytes,
+                    stats.warningCount(),
+                    stats.errorCount,
+                    "",
+                    ""
+            ));
+            recordEvent(source, operationId, "INFO", "DONE", "MOVE", "FILE_MOVE_FINISHED",
+                    sourceSummary, targetDirectory, null,
+                    "File move finished.",
+                    "files=" + stats.fileCount + ", directories=" + stats.directoryCount
+                            + ", skipped=" + stats.skippedCount + ", errors=" + stats.errorCount
+                            + ", bytes=" + stats.totalBytes);
+        } catch (CopyCancelledException ex) {
+            try {
+                recordEvent(source, operationId, "WARN", "CANCELLED", "MOVE", "FILE_MOVE_CANCELLED",
+                        sourceSummary, targetDirectory, null, "File move cancelled.", "");
+                runRepository.markCancelled(operationId, new SyncRunSummary(
+                        "USER_CANCELLED",
+                        stats.itemCount(),
+                        stats.fileCount,
+                        stats.directoryCount,
+                        stats.totalBytes,
+                        stats.warningCount(),
+                        stats.errorCount,
+                        "USER_CANCELLED",
+                        "File move cancelled by user."
+                ));
+            } catch (SQLException sqlEx) {
+                // The caller can still see the operation as RUNNING if the database is unavailable.
+            }
+        } catch (Exception ex) {
+            if (control.isCancelled()) {
+                try {
+                    recordEvent(source, operationId, "WARN", "CANCELLED", "MOVE", "FILE_MOVE_CANCELLED",
+                            sourceSummary, targetDirectory, null, "File move cancelled.", "");
+                    runRepository.markCancelled(operationId, new SyncRunSummary(
+                            "USER_CANCELLED",
+                            stats.itemCount(),
+                            stats.fileCount,
+                            stats.directoryCount,
+                            stats.totalBytes,
+                            stats.warningCount(),
+                            stats.errorCount,
+                            "USER_CANCELLED",
+                            "File move cancelled by user."
+                    ));
+                } catch (SQLException ignored) {
+                    // The operation row already captures the latest progress available.
+                }
+                return;
+            }
+            stats.errorCount++;
+            String message = safeMessage(ex);
+            try {
+                recordEvent(source, operationId, "ERROR", "FAILED", "MOVE", "FILE_MOVE_FAILED",
+                        sourceSummary, targetDirectory, null, message, "");
+                runRepository.markFailure(operationId, new SyncRunSummary(
+                        "FAILED",
+                        stats.itemCount(),
+                        stats.fileCount,
+                        stats.directoryCount,
+                        stats.totalBytes,
+                        stats.warningCount(),
+                        stats.errorCount,
+                        "FILE_OPERATION_ERROR",
+                        message
+                ));
+            } catch (SQLException sqlEx) {
+                // Keep the worker alive; the original move failure is already represented in logs.
+            }
+        } finally {
+            control.detachWorker(Thread.currentThread());
+            controls.remove(operationId);
+        }
+    }
+
     private void runComparedCopy(ComparedCopyRequest request,
                                  SyncTask source,
                                  SyncTask target,
@@ -347,6 +491,10 @@ public final class FileCopyService implements AutoCloseable {
                 for (CopyCandidate candidate : compare.filesToCopy()) {
                     control.throwIfCancelled();
                     String targetPath = targetEndpoint.childPath(targetDirectory, candidate.source().relativePath());
+                    recordEvent(source, operationId, "INFO", "COPY", "COPY", "FILE_COPYING",
+                            candidate.source().sourcePath(), targetPath, candidate.source().size(),
+                            "Copying file.", "action=" + candidate.action()
+                                    + ", relativePath=" + candidate.source().relativePath());
                     try (InputStream input = sourceEndpoint.openRead(candidate.source().sourcePath())) {
                         boolean copied = targetEndpoint.writeFile(targetPath, input, request.conflictPolicy(), control);
                         if (copied) {
@@ -508,6 +656,9 @@ public final class FileCopyService implements AutoCloseable {
             return;
         }
 
+        recordEvent(source, operationId, "INFO", "COPY", "COPY", "FILE_COPYING",
+                sourceNode.path(), targetPath, sourceNode.size(),
+                "Copying file.", "bytes=" + sourceNode.size());
         try (InputStream input = sourceEndpoint.openRead(sourceNode.path())) {
             boolean copied = targetEndpoint.writeFile(targetPath, input, conflictPolicy, control);
             if (copied) {
@@ -527,6 +678,48 @@ public final class FileCopyService implements AutoCloseable {
         }
     }
 
+    private void moveEntry(FileEndpoint endpoint,
+                           String sourcePath,
+                           String targetDirectory,
+                           String conflictPolicy,
+                           long operationId,
+                           SyncTask source,
+                           CopyStats stats,
+                           CopyControl control) throws Exception {
+        control.throwIfCancelled();
+        FileNode sourceNode = endpoint.stat(sourcePath);
+        String targetPath = endpoint.childPath(targetDirectory, sourceNode.name());
+        if (!"DIRECTORY".equals(sourceNode.type()) && !"FILE".equals(sourceNode.type())) {
+            stats.skippedCount++;
+            stats.warningCount++;
+            recordEvent(source, operationId, "WARN", "MOVE", "MOVE", "FILE_MOVE_SKIPPED",
+                    sourceNode.path(), targetPath, null,
+                    "Unsupported file type skipped.", "type=" + sourceNode.type());
+            recordProgress(operationId, stats);
+            return;
+        }
+
+        boolean moved = endpoint.moveEntry(sourceNode.path(), targetPath, conflictPolicy, control);
+        if (moved) {
+            if ("DIRECTORY".equals(sourceNode.type())) {
+                stats.directoryCount++;
+            } else {
+                stats.fileCount++;
+                stats.totalBytes += sourceNode.size();
+            }
+            recordEvent(source, operationId, "INFO", "MOVE", "MOVE", "FILE_MOVED",
+                    sourceNode.path(), targetPath, "FILE".equals(sourceNode.type()) ? sourceNode.size() : null,
+                    "File moved.", "type=" + sourceNode.type());
+        } else {
+            stats.skippedCount++;
+            stats.warningCount++;
+            recordEvent(source, operationId, "WARN", "MOVE", "MOVE", "FILE_MOVE_SKIPPED",
+                    sourceNode.path(), targetPath, "FILE".equals(sourceNode.type()) ? sourceNode.size() : null,
+                    "File skipped because target already exists.", "policy=SKIP");
+        }
+        recordProgress(operationId, stats);
+    }
+
     private void recordCopyItemFailure(SyncTask source,
                                         long operationId,
                                         String sourcePath,
@@ -535,6 +728,18 @@ public final class FileCopyService implements AutoCloseable {
                                        Exception ex) throws SQLException {
         stats.errorCount++;
         recordEvent(source, operationId, "ERROR", "COPY", "COPY", "FILE_COPY_ITEM_FAILED",
+                sourcePath, targetPath, null, safeMessage(ex), "");
+        recordProgress(operationId, stats);
+    }
+
+    private void recordMoveItemFailure(SyncTask source,
+                                       long operationId,
+                                       String sourcePath,
+                                       String targetPath,
+                                       CopyStats stats,
+                                       Exception ex) throws SQLException {
+        stats.errorCount++;
+        recordEvent(source, operationId, "ERROR", "MOVE", "MOVE", "FILE_MOVE_ITEM_FAILED",
                 sourcePath, targetPath, null, safeMessage(ex), "");
         recordProgress(operationId, stats);
     }
@@ -595,6 +800,13 @@ public final class FileCopyService implements AutoCloseable {
     private void collectSourceSnapshot(FileEndpoint endpoint, String sourcePath, List<SnapshotEntry> entries)
             throws Exception {
         FileNode rootNode = endpoint.stat(sourcePath);
+        if ("DIRECTORY".equals(rootNode.type())) {
+            // Compared directory tasks sync the contents of the source directory.
+            for (FileNode child : endpoint.list(rootNode.path())) {
+                collectSnapshotNode(endpoint, child, normalizeRelativePath(child.name()), entries);
+            }
+            return;
+        }
         String rootRelative = normalizeRelativePath(rootNode.name());
         if (rootRelative.isBlank()) {
             rootRelative = normalizeRelativePath(lastPathSegment(rootNode.path()));
@@ -752,6 +964,26 @@ public final class FileCopyService implements AutoCloseable {
         }
     }
 
+    private void rejectRecursiveMove(SyncTask source, List<String> sourcePaths, String targetDirectory) {
+        if (isLocalSource(source)) {
+            Path targetDir = resolveLocalWithinRoot(source, targetDirectory);
+            for (String sourcePath : sourcePaths) {
+                Path sourceTarget = resolveLocalWithinRoot(source, sourcePath);
+                if (targetDir.equals(sourceTarget) || targetDir.startsWith(sourceTarget)) {
+                    throw new IllegalArgumentException("Cannot move a directory into itself: " + sourcePath);
+                }
+            }
+            return;
+        }
+        String targetDir = normalizeRemote(targetDirectory);
+        for (String sourcePath : sourcePaths) {
+            String sourceTarget = normalizeRemote(sourcePath);
+            if (targetDir.equals(sourceTarget) || targetDir.startsWith(sourceTarget + "/")) {
+                throw new IllegalArgumentException("Cannot move a directory into itself: " + sourcePath);
+            }
+        }
+    }
+
     private static Path resolveLocalWithinRoot(SyncTask source, String path) {
         Path root = LocalPathSupport.toAbsolutePath(source.sourcePath());
         Path target = LocalPathSupport.resolveWithinRoot(root, path);
@@ -800,6 +1032,22 @@ public final class FileCopyService implements AutoCloseable {
         }
         String policy = normalizeConflictPolicy(request.conflictPolicy());
         return new CopyRequest(sourceId, paths, targetId, value(request.targetDirectory(), ""), policy);
+    }
+
+    private MoveRequest normalizeMoveRequest(MoveRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Move request is empty.");
+        }
+        String sourceId = required(request.sourceId(), "sourceId");
+        List<String> paths = request.sourcePaths() == null ? List.of() : request.sourcePaths().stream()
+                .filter(path -> path != null && !path.isBlank())
+                .map(String::trim)
+                .toList();
+        if (paths.isEmpty()) {
+            throw new IllegalArgumentException("sourcePaths must contain at least one path.");
+        }
+        String policy = normalizeConflictPolicy(request.conflictPolicy());
+        return new MoveRequest(sourceId, paths, value(request.targetDirectory(), ""), policy);
     }
 
     private ComparedCopyRequest normalizeComparedRequest(ComparedCopyRequest request) {
@@ -943,6 +1191,8 @@ public final class FileCopyService implements AutoCloseable {
 
         boolean writeFile(String path, InputStream input, String conflictPolicy, CopyControl control) throws Exception;
 
+        boolean moveEntry(String sourcePath, String targetPath, String conflictPolicy, CopyControl control) throws Exception;
+
         String childPath(String parent, String child);
 
         @Override
@@ -1039,6 +1289,35 @@ public final class FileCopyService implements AutoCloseable {
         }
 
         @Override
+        public boolean moveEntry(String sourcePath, String targetPath, String conflictPolicy, CopyControl control)
+                throws IOException {
+            control.throwIfCancelled();
+            Path sourceTarget = resolve(sourcePath);
+            Path target = resolve(targetPath);
+            if (sourceTarget.equals(target)) {
+                return false;
+            }
+            if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                if ("SKIP".equals(conflictPolicy)) {
+                    return false;
+                }
+                if ("FAIL".equals(conflictPolicy)) {
+                    throw new IOException("Target file already exists: " + target);
+                }
+            }
+            Path parent = target.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            if ("OVERWRITE".equals(conflictPolicy)) {
+                Files.move(sourceTarget, target, StandardCopyOption.REPLACE_EXISTING);
+            } else {
+                Files.move(sourceTarget, target);
+            }
+            return true;
+        }
+
+        @Override
         public String childPath(String parent, String child) {
             return resolve(parent).resolve(child == null ? "" : child).normalize().toString();
         }
@@ -1117,6 +1396,11 @@ public final class FileCopyService implements AutoCloseable {
 
         @Override
         public boolean writeFile(String path, InputStream input, String conflictPolicy, CopyControl control) {
+            throw new UnsupportedOperationException("Cached source endpoint is read-only.");
+        }
+
+        @Override
+        public boolean moveEntry(String sourcePath, String targetPath, String conflictPolicy, CopyControl control) {
             throw new UnsupportedOperationException("Cached source endpoint is read-only.");
         }
 
@@ -1312,6 +1596,40 @@ public final class FileCopyService implements AutoCloseable {
         }
 
         @Override
+        public boolean moveEntry(String sourcePath, String targetPath, String conflictPolicy, CopyControl control)
+                throws IOException {
+            control.throwIfCancelled();
+            String sourceTarget = validate(sourcePath);
+            String target = validate(targetPath);
+            if (sourceTarget.equals(target)) {
+                return false;
+            }
+            if (exists(target)) {
+                if ("SKIP".equals(conflictPolicy)) {
+                    return false;
+                }
+                if ("FAIL".equals(conflictPolicy)) {
+                    throw new IOException("Target file already exists: " + target);
+                }
+                FileNode targetNode = stat(target);
+                if ("DIRECTORY".equals(targetNode.type())) {
+                    throw new IOException("Cannot overwrite target directory: " + target);
+                }
+                if (!client.deleteFile(target)) {
+                    throw new IOException("Remote overwrite delete failed: FTP "
+                            + client.getReplyCode() + " " + reply(client));
+                }
+            }
+            ensureDirectory(parentRemotePath(target));
+            boolean renamed = client.rename(sourceTarget, target);
+            int code = client.getReplyCode();
+            if (!renamed || code >= 400) {
+                throw new IOException("Remote move failed: FTP " + code + " " + reply(client));
+            }
+            return true;
+        }
+
+        @Override
         public String childPath(String parent, String child) {
             return validate(childRemotePath(parent, child));
         }
@@ -1386,6 +1704,14 @@ public final class FileCopyService implements AutoCloseable {
             String sourceId,
             List<String> sourcePaths,
             String targetId,
+            String targetDirectory,
+            String conflictPolicy
+    ) {
+    }
+
+    public record MoveRequest(
+            String sourceId,
+            List<String> sourcePaths,
             String targetDirectory,
             String conflictPolicy
     ) {
